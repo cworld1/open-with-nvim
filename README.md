@@ -4,7 +4,7 @@
 
 A helper that helps open with nvim on Windows. This will open nvim with specific file by Windows Terminal, so this program doesn't have GUI.
 
-![video](./.github/res/record.mp4)
+https://github.com/user-attachments/assets/04636a26-dd26-4345-a90b-63ff2cdf147b
 
 ## Features
 
