@@ -12,6 +12,10 @@ You can:
 - Drag files to exe to open it.
 - Set open with this exe on any files.
 
+## Usage
+
+Run the executable once to generate open-with-nvim.ini in the same directory, then edit that file with your preferred settings.
+
 ## Local Development
 
 Prerequisites:
