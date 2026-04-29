@@ -20,9 +20,78 @@ typedef struct AppConfig {
     wchar_t editor[128];
 } AppConfig;
 
+/* Application version for releases. */
+#define APP_VERSION L"1.1"
+
+/* Build Windows Terminal argument strings (preferred + fallback). */
+static HRESULT BuildWtArgs(const AppConfig *cfg,
+                          const wchar_t *msysPath,
+                          wchar_t *args,
+                          size_t argsCount,
+                          wchar_t *altArgs,
+                          size_t altCount)
+{
+    wchar_t escapedPath[32768];
+
+    if (msysPath != NULL && *msysPath != L'\0') {
+        if (FAILED(EscapeForFishSingleQuotes(msysPath, escapedPath, _countof(escapedPath)))) {
+            return STRSAFE_E_INSUFFICIENT_BUFFER;
+        }
+
+        if (FAILED(StringCchPrintfW(
+                args,
+                argsCount,
+                L"-w 0 -p \"%s\" %s -c \"%s -- '%s'\"",
+                cfg->terminalProfile,
+                cfg->shell,
+                cfg->editor,
+                escapedPath))) {
+            return STRSAFE_E_INSUFFICIENT_BUFFER;
+        }
+
+        if (FAILED(StringCchPrintfW(
+                altArgs,
+                altCount,
+                L"-p \"%s\" %s -c \"%s -- '%s'\"",
+                cfg->terminalProfile,
+                cfg->shell,
+                cfg->editor,
+                escapedPath))) {
+            return STRSAFE_E_INSUFFICIENT_BUFFER;
+        }
+    } else {
+        if (FAILED(StringCchPrintfW(
+                args,
+                argsCount,
+                L"-w 0 -p \"%s\" %s -c \"%s\"",
+                cfg->terminalProfile,
+                cfg->shell,
+                cfg->editor))) {
+            return STRSAFE_E_INSUFFICIENT_BUFFER;
+        }
+
+        if (FAILED(StringCchPrintfW(
+                altArgs,
+                altCount,
+                L"-p \"%s\" %s -c \"%s\"",
+                cfg->terminalProfile,
+                cfg->shell,
+                cfg->editor))) {
+            return STRSAFE_E_INSUFFICIENT_BUFFER;
+        }
+    }
+
+    return S_OK;
+}
+
 static HRESULT WinPathToMsys2(const wchar_t *winPath,
                               wchar_t *outBuf,
                               size_t outSize);
+
+/* Forward declaration for GetSiblingPath used by logging helper. */
+static HRESULT GetSiblingPath(const wchar_t *fileName,
+                              wchar_t *outPath,
+                              size_t outCount);
 
 /* Build an absolute path to a file placed next to the current executable. */
 static HRESULT GetSiblingPath(const wchar_t *fileName,
@@ -189,43 +258,19 @@ static HRESULT EscapeForFishSingleQuotes(const wchar_t *input,
 /* Launch Windows Terminal using ShellExecute without opening a console window. */
 static BOOL LaunchWt(const AppConfig *cfg, const wchar_t *msysPath)
 {
-    wchar_t escapedPath[32768];
     wchar_t args[65536];
+    wchar_t altArgs[65536];
 
-    if (msysPath != NULL && *msysPath != L'\0') {
-        if (FAILED(EscapeForFishSingleQuotes(msysPath, escapedPath, _countof(escapedPath)))) {
-            return FALSE;
-        }
-
-        if (FAILED(StringCchPrintfW(
-                args,
-                _countof(args),
-                L"-w 0 -p \"%s\" %s -c \"%s -- '%s'\"",
-                cfg->terminalProfile,
-                cfg->shell,
-                cfg->editor,
-                escapedPath))) {
-            return FALSE;
-        }
-    } else {
-        if (FAILED(StringCchPrintfW(
-                args,
-                _countof(args),
-                L"-w 0 -p \"%s\" %s -c \"%s\"",
-                cfg->terminalProfile,
-                cfg->shell,
-                cfg->editor))) {
-            return FALSE;
-        }
+    if (FAILED(BuildWtArgs(cfg, msysPath, args, _countof(args), altArgs, _countof(altArgs)))) {
+        return FALSE;
     }
 
-    HINSTANCE rc = ShellExecuteW(
-        NULL,               /* Parent window */
-        L"open",            /* Shell action */
-        L"wt.exe",          /* Executable resolved from PATH */
-        args,               /* Command arguments */
-        NULL,               /* Default working directory */
-        SW_HIDE);           /* Keep the launcher hidden */
+    /* Try preferred form first, then fallback to the alternate if it fails. */
+    HINSTANCE rc = ShellExecuteW(NULL, L"open", L"wt.exe", args, NULL, SW_SHOWNORMAL);
+
+    if (!((INT_PTR)rc > 32)) {
+        rc = ShellExecuteW(NULL, L"open", L"wt.exe", altArgs, NULL, SW_SHOWNORMAL);
+    }
 
     return ((INT_PTR)rc > 32);
 }
