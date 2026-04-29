@@ -19,11 +19,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "CWorld"
             VALUE "FileDescription",  "Nvim"
-            VALUE "FileVersion",      "1.0.0"
+            VALUE "FileVersion",      "1.1.0.0"
             VALUE "InternalName",     "nvim"
             VALUE "OriginalFilename", "nvim.exe"
             VALUE "ProductName",      "Nvim"
-            VALUE "ProductVersion",   "1.0"
+            VALUE "ProductVersion",   "1.1.0"
         END
     END
     BLOCK "VarFileInfo"
