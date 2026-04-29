@@ -1,0 +1,36 @@
+#include "winres.h"          // Windows resource constants
+
+IDI_APP_ICON ICON "app.ico"   // Application icon
+
+// Version information
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     1,0,0,0
+PRODUCTVERSION  1,0,0,0
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+FILESUBTYPE     VFT2_UNKNOWN
+
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"            // Language and code page
+        BEGIN
+            VALUE "CompanyName",      "CWorld"
+            VALUE "FileDescription",  "Open with nvim"
+            VALUE "FileVersion",      "1.0.0"
+            VALUE "InternalName",     "nvim"
+            VALUE "OriginalFilename", "nvim.exe"
+            VALUE "ProductName",      "Nvim"
+            VALUE "ProductVersion",   "1.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200   // EN-US + Unicode
+    END
+END
+
+// External manifest for DPI and compatibility settings
+1 24 MOVEABLE PURE "app.manifest"
