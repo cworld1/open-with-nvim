@@ -13,6 +13,7 @@ You can:
 - Click to open a nvim window.
 - Drag files to exe to open it.
 - Set open with this exe on any files.
+- Open a folder as Neovim's working directory; opening a file uses its containing folder.
 
 ## Usage
 
@@ -22,7 +23,8 @@ Run the executable once to generate open-with-nvim.ini in the same directory, th
 
 Prerequisites:
 
-- GCC compiler.
+- A Windows-targeting C23 compiler (MinGW GCC or Clang), plus `windres`.
+- CMake 3.21 or newer and GNU Make for the CMake build below.
 
 Clone the repository and navigate to the project directory:
 
@@ -31,7 +33,19 @@ git clone https://github.com/cworld1/open-with-nvim.git
 cd open-with-nvim
 ```
 
-Then compiler with shell script:
+Configure and build from a shell where these tools are on `PATH`:
+
+```bash
+cmake -S . -B build -G "Unix Makefiles" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+cmake --build build
+```
+
+The executable is `build/nvim.exe`; the compilation database for editor tooling
+is `build/compile_commands.json`. The runtime INI file is created beside the
+executable, so copy your existing INI there if you want to reuse its settings.
+Use a MinGW toolchain rather than the MSYS compiler, which targets the MSYS runtime.
+
+Alternatively, build `nvim.exe` in the repository root with the existing script:
 
 ```bash
 ./build.sh
