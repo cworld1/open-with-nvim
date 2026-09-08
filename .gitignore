@@ -2,3 +2,5 @@
 nvim.exe
 app.res
 open-with-nvim.ini
+/build/
+/compile_commands.json
