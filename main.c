@@ -1,313 +1,276 @@
-/*
- * Launch Neovim in Windows Terminal with a dragged file or directory path.
- */
-
+/* A configurable terminal launcher for Neovim. */
 #ifndef UNICODE
-#   define UNICODE
+#define UNICODE
 #endif
 #ifndef _UNICODE
-#   define _UNICODE
+#define _UNICODE
 #endif
 
 #include <windows.h>
 #include <shellapi.h>
 #include <strsafe.h>
+#include <string.h>
 #include <wctype.h>
 
-typedef struct AppConfig {
-    wchar_t terminalProfile[128];
-    wchar_t shell[64];
-    wchar_t editor[128];
+enum { PATH_CAPACITY = 32768, COMMAND_CAPACITY = 65536 };
+
+typedef enum { TITLE_FILENAME, TITLE_SIMPLE, TITLE_FULL } TitleStyle;
+typedef enum { FILE_NORMAL, FILE_MSYS } FileStyle;
+
+typedef struct {
+    wchar_t command[COMMAND_CAPACITY];
+    TitleStyle titleStyle;
+    FileStyle fileStyle;
 } AppConfig;
 
-enum { PATH_CAPACITY = 32768 };
-
-/* Fish single-quoted strings recognize both \\' and \\\\ escapes. */
-static HRESULT EscapeForFishSingleQuotes(const wchar_t *input,
-                                         wchar_t *output,
-                                         size_t outputCount)
+static HRESULT GetSiblingPath(const wchar_t *name, wchar_t *path, size_t pathCount)
 {
-    size_t outPos = 0;
+    DWORD length = GetModuleFileNameW(NULL, path, (DWORD)pathCount);
+    wchar_t *separator = wcsrchr(path, L'\\');
+    if (length == 0 || length >= pathCount || separator == NULL) return E_FAIL;
+    separator[1] = L'\0';
+    return StringCchCatW(path, pathCount, name);
+}
 
-    if (outputCount == 0) {
-        return STRSAFE_E_INSUFFICIENT_BUFFER;
+static void CreateDefaultConfig(const wchar_t *path)
+{
+    static const char content[] =
+        "; open-with-nvim runtime configuration\n"
+        "[open-with-nvim]\n"
+        "; %f=file, %d=terminal directory, %t=title\n"
+        "command=wt nt -d %d -p \"Fish Shell\" --title %t nvim %f\n"
+        "; normal (C:\\path) or msys (/c/path) for %f and %t\n"
+        "file-style=normal\n"
+        "; filename, simple, or full\n"
+        "title-style=filename\n";
+    HANDLE file = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_NEW,
+                              FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file != INVALID_HANDLE_VALUE) {
+        DWORD written;
+        WriteFile(file, content, (DWORD)(sizeof(content) - 1), &written, NULL);
+        CloseHandle(file);
     }
+}
 
-    while (*input) {
-        if (*input == L'\'' || *input == L'\\') {
-            if (outPos + 2 >= outputCount) {
-                return STRSAFE_E_INSUFFICIENT_BUFFER;
+/* Profile APIs parse embedded quotes, so command is read as literal INI text. */
+static void ReadCommandSetting(const wchar_t *path, wchar_t *command, size_t commandCount)
+{
+    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    LARGE_INTEGER size;
+    char *text = NULL;
+    DWORD read;
+
+    if (file == INVALID_HANDLE_VALUE || !GetFileSizeEx(file, &size) ||
+        size.QuadPart < 0 || size.QuadPart > COMMAND_CAPACITY) goto done;
+    text = HeapAlloc(GetProcessHeap(), 0, (SIZE_T)size.QuadPart + 1);
+    if (text == NULL || !ReadFile(file, text, (DWORD)size.QuadPart, &read, NULL)) goto done;
+    text[read] = '\0';
+
+    BOOL inSection = FALSE;
+    for (char *line = text; line != NULL;) {
+        char *next = strpbrk(line, "\r\n");
+        if (next != NULL) {
+            *next++ = '\0';
+            while (*next == '\r' || *next == '\n') ++next;
+        }
+        while (*line == ' ' || *line == '\t') ++line;
+        if (*line == '[') {
+            inSection = strcmp(line, "[open-with-nvim]") == 0;
+        } else if (inSection && strncmp(line, "command", 7) == 0) {
+            char *value = line + 7;
+            while (*value == ' ' || *value == '\t') ++value;
+            if (*value == L'=') {
+                ++value;
+                while (*value == ' ' || *value == '\t') ++value;
+                char *end = value + strlen(value);
+                while (end > value && (end[-1] == ' ' || end[-1] == '\t')) *--end = '\0';
+                if (end - value >= 2 && value[0] == '"' && end[-1] == '"') {
+                    ++value;
+                    end[-1] = '\0';
+                }
+                if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, command,
+                                        (int)commandCount) == 0)
+                    MultiByteToWideChar(CP_ACP, 0, value, -1, command, (int)commandCount);
+                break;
             }
-            output[outPos++] = L'\\';
         }
-        if (outPos + 1 >= outputCount) {
-            return STRSAFE_E_INSUFFICIENT_BUFFER;
-        }
-        output[outPos++] = *input++;
+        line = next;
     }
 
-    output[outPos] = L'\0';
+done:
+    if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+    if (text != NULL) HeapFree(GetProcessHeap(), 0, text);
+}
+
+static void LoadConfig(AppConfig *config)
+{
+    wchar_t iniPath[PATH_CAPACITY], titleStyle[16], fileStyle[16];
+    StringCchCopyW(config->command, _countof(config->command),
+                   L"wt nt -d %d -p \"Fish Shell\" --title %t nvim %f");
+    config->titleStyle = TITLE_FILENAME;
+    config->fileStyle = FILE_NORMAL;
+    if (FAILED(GetSiblingPath(L"open-with-nvim.ini", iniPath, _countof(iniPath)))) return;
+
+    CreateDefaultConfig(iniPath);
+    ReadCommandSetting(iniPath, config->command, _countof(config->command));
+    GetPrivateProfileStringW(L"open-with-nvim", L"title-style", L"filename", titleStyle,
+                             (DWORD)_countof(titleStyle), iniPath);
+    GetPrivateProfileStringW(L"open-with-nvim", L"file-style", L"normal", fileStyle,
+                             (DWORD)_countof(fileStyle), iniPath);
+    if (_wcsicmp(titleStyle, L"simple") == 0) config->titleStyle = TITLE_SIMPLE;
+    else if (_wcsicmp(titleStyle, L"full") == 0) config->titleStyle = TITLE_FULL;
+    if (_wcsicmp(fileStyle, L"msys") == 0) config->fileStyle = FILE_MSYS;
+}
+
+/* Append one argument using the quoting rules used by CreateProcess. */
+static HRESULT QuoteArgument(wchar_t *output, size_t outputCount, const wchar_t *input)
+{
+    if (FAILED(StringCchCatW(output, outputCount, L"\""))) return STRSAFE_E_INSUFFICIENT_BUFFER;
+    for (const wchar_t *cursor = input;;) {
+        size_t slashes = 0;
+        while (*cursor == L'\\') { ++slashes; ++cursor; }
+        size_t count = *cursor == L'"' ? slashes * 2 + 1 : *cursor ? slashes : slashes * 2;
+        for (size_t i = 0; i < count; ++i)
+            if (FAILED(StringCchCatW(output, outputCount, L"\\"))) return STRSAFE_E_INSUFFICIENT_BUFFER;
+        if (*cursor == L'\0') break;
+        if (FAILED(StringCchCatNW(output, outputCount, cursor, 1))) return STRSAFE_E_INSUFFICIENT_BUFFER;
+        ++cursor;
+    }
+    return StringCchCatW(output, outputCount, L"\"");
+}
+
+static HRESULT GetTargetDirectory(const wchar_t *target, wchar_t *directory, size_t directoryCount)
+{
+    DWORD attributes = GetFileAttributesW(target);
+    if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY))
+        return StringCchCopyW(directory, directoryCount, target);
+    HRESULT result = StringCchCopyW(directory, directoryCount, target);
+    wchar_t *separator = wcsrchr(directory, L'\\');
+    if (FAILED(result) || separator == NULL) return E_FAIL;
+    if (separator == directory + 2 && directory[1] == L':') ++separator;
+    *separator = L'\0';
     return S_OK;
 }
 
-/* Build Windows Terminal argument strings (preferred + fallback). */
-static HRESULT BuildWtArgs(const AppConfig *cfg,
-                          const wchar_t *msysPath,
-                          const wchar_t *msysDirectory,
-                          wchar_t *args,
-                          size_t argsCount,
-                          wchar_t *altArgs,
-                          size_t altCount)
+static HRESULT GetDefaultDirectory(wchar_t *directory, size_t directoryCount)
 {
-    wchar_t escapedPath[PATH_CAPACITY];
-    wchar_t escapedDirectory[PATH_CAPACITY];
-
-    if (msysPath != NULL && *msysPath != L'\0') {
-        if (msysDirectory == NULL || *msysDirectory == L'\0') {
-            return E_INVALIDARG;
-        }
-        if (FAILED(EscapeForFishSingleQuotes(msysPath, escapedPath, _countof(escapedPath)))) {
-            return STRSAFE_E_INSUFFICIENT_BUFFER;
-        }
-        if (FAILED(EscapeForFishSingleQuotes(msysDirectory, escapedDirectory, _countof(escapedDirectory)))) {
-            return STRSAFE_E_INSUFFICIENT_BUFFER;
-        }
-
-        if (FAILED(StringCchPrintfW(
-                altArgs,
-                altCount,
-                L"-p \"%s\" %s -c \"cd -- '%s' && exec %s -- '%s'\"",
-                cfg->terminalProfile,
-                cfg->shell,
-                escapedDirectory,
-                cfg->editor,
-                escapedPath))) {
-            return STRSAFE_E_INSUFFICIENT_BUFFER;
-        }
-    } else {
-        if (FAILED(StringCchPrintfW(
-                altArgs,
-                altCount,
-                L"-p \"%s\" %s -c \"%s\"",
-                cfg->terminalProfile,
-                cfg->shell,
-                cfg->editor))) {
-            return STRSAFE_E_INSUFFICIENT_BUFFER;
-        }
-    }
-
-    return StringCchPrintfW(args, argsCount, L"-w 0 %s", altArgs);
+    DWORD length = GetEnvironmentVariableW(L"USERPROFILE", directory, (DWORD)directoryCount);
+    if (length > 0 && length < directoryCount) return S_OK;
+    length = GetCurrentDirectoryW((DWORD)directoryCount, directory);
+    return (length > 0 && length < directoryCount) ? S_OK : E_FAIL;
 }
 
-/* Build an absolute path to a file placed next to the current executable. */
-static HRESULT GetSiblingPath(const wchar_t *fileName,
-                              wchar_t *outPath,
-                              size_t outCount)
+static HRESULT FormatFilePath(FileStyle style, const wchar_t *input, wchar_t *output, size_t outputCount)
 {
-    DWORD len = GetModuleFileNameW(NULL, outPath, (DWORD)outCount);
-    if (len == 0 || len >= outCount) {
-        return E_FAIL;
-    }
-
-    wchar_t *lastSlash = wcsrchr(outPath, L'\\');
-    if (lastSlash == NULL) {
-        return E_FAIL;
-    }
-    *(lastSlash + 1) = L'\0';
-
-    return StringCchCatW(outPath, outCount, fileName);
-}
-
-/* Create a default config file if it does not exist. */
-static void EnsureDefaultConfigFile(const wchar_t *configPath)
-{
-    static const char defaultConfig[] =
-        "; open-with-nvim runtime configuration\r\n"
-        "[open-with-nvim]\r\n"
-        "terminal_profile=Fish Shell\r\n"
-        "shell=fish\r\n"
-        "editor=nvim\r\n";
-
-    HANDLE hFile = CreateFileW(configPath,
-                               GENERIC_WRITE,
-                               FILE_SHARE_READ,
-                               NULL,
-                               CREATE_NEW,
-                               FILE_ATTRIBUTE_NORMAL,
-                               NULL);
-    if (hFile == INVALID_HANDLE_VALUE) {
-        return;
-    }
-
-    DWORD written = 0;
-    WriteFile(hFile,
-                        defaultConfig,
-                        (DWORD)(sizeof(defaultConfig) - 1),
-                        &written,
-                        NULL);
-    CloseHandle(hFile);
-}
-
-/* Load runtime config from ini file in the executable directory. */
-static void LoadAppConfig(AppConfig *cfg)
-{
-    wchar_t configPath[PATH_CAPACITY];
-
-    StringCchCopyW(cfg->terminalProfile, _countof(cfg->terminalProfile), L"Fish Shell");
-    StringCchCopyW(cfg->shell, _countof(cfg->shell), L"fish");
-    StringCchCopyW(cfg->editor, _countof(cfg->editor), L"nvim");
-
-    if (FAILED(GetSiblingPath(L"open-with-nvim.ini", configPath, _countof(configPath)))) {
-        return;
-    }
-
-    EnsureDefaultConfigFile(configPath);
-
-    GetPrivateProfileStringW(L"open-with-nvim",
-                             L"terminal_profile",
-                             L"Fish Shell",
-                             cfg->terminalProfile,
-                             (DWORD)_countof(cfg->terminalProfile),
-                             configPath);
-
-    GetPrivateProfileStringW(L"open-with-nvim",
-                             L"shell",
-                             L"fish",
-                             cfg->shell,
-                             (DWORD)_countof(cfg->shell),
-                             configPath);
-
-    GetPrivateProfileStringW(L"open-with-nvim",
-                             L"editor",
-                             L"nvim",
-                             cfg->editor,
-                             (DWORD)_countof(cfg->editor),
-                             configPath);
-}
-
-/* Convert "C:\\foo\\Bar" to "/c/foo/Bar" for MSYS-compatible shells. */
-static HRESULT WinPathToMsys2(const wchar_t *winPath,
-                              wchar_t *outBuf,
-                              size_t outSize)
-{
-    size_t srcLen = wcslen(winPath);
-
-    if (outSize < 3) {
+    if (style == FILE_NORMAL) return StringCchCopyW(output, outputCount, input);
+    if (input[0] && input[1] == L':') {
+        if (FAILED(StringCchPrintfW(output, outputCount, L"/%c%s", towlower(input[0]), input + 2)))
+            return STRSAFE_E_INSUFFICIENT_BUFFER;
+    } else if (FAILED(StringCchCopyW(output, outputCount, input))) {
         return STRSAFE_E_INSUFFICIENT_BUFFER;
     }
-
-    if (srcLen < 2 || winPath[1] != L':') {
-        HRESULT hr = StringCchCopyW(outBuf, outSize, winPath);
-        if (SUCCEEDED(hr)) {
-            for (wchar_t *p = outBuf; *p; ++p) {
-                if (*p == L'\\') *p = L'/';
-            }
-        }
-        return hr;
-    }
-
-    wchar_t drive = towlower(winPath[0]);
-    outBuf[0] = L'/';
-    outBuf[1] = drive;
-    outBuf[2] = L'\0';
-
-    const wchar_t *src = winPath + 2;
-    size_t pos = 2;
-
-    while (*src && pos + 1 < outSize) {
-        wchar_t ch = *src++;
-        outBuf[pos++] = (ch == L'\\') ? L'/' : ch;
-    }
-
-    if (*src != L'\0') {
-        return STRSAFE_E_INSUFFICIENT_BUFFER;
-    }
-
-    outBuf[pos] = L'\0';
+    for (wchar_t *p = output; *p; ++p) if (*p == L'\\') *p = L'/';
     return S_OK;
 }
 
-/* Launch Windows Terminal using ShellExecute without opening a console window. */
-static BOOL LaunchWt(const AppConfig *cfg, const wchar_t *msysPath,
-                     const wchar_t *msysDirectory)
+static HRESULT BuildTitle(const wchar_t *path, TitleStyle style, wchar_t *title, size_t titleCount)
 {
-    wchar_t args[65536];
-    wchar_t altArgs[65536];
+    wchar_t normalized[PATH_CAPACITY];
+    HRESULT result = StringCchCopyW(normalized, _countof(normalized), path);
+    if (FAILED(result)) return result;
+    for (wchar_t *p = normalized; *p; ++p) if (*p == L'\\') *p = L'/';
+    wchar_t *filename = wcsrchr(normalized, L'/');
+    filename = filename ? filename + 1 : normalized;
+    if (style == TITLE_FILENAME) return StringCchCopyW(title, titleCount, filename);
+    if (style == TITLE_FULL) return StringCchCopyW(title, titleCount, normalized);
 
-    if (FAILED(BuildWtArgs(cfg, msysPath, msysDirectory, args, _countof(args), altArgs, _countof(altArgs)))) {
-        return FALSE;
+    title[0] = L'\0';
+    for (wchar_t *part = normalized; *part;) {
+        wchar_t *separator = wcschr(part, L'/');
+        if (separator == NULL) return StringCchCatW(title, titleCount, part);
+        size_t length = (part == normalized && part[1] == L':') ? 2 : 1;
+        if (separator != part && FAILED(StringCchCatNW(title, titleCount, part, length)))
+            return STRSAFE_E_INSUFFICIENT_BUFFER;
+        if (FAILED(StringCchCatW(title, titleCount, L"/"))) return STRSAFE_E_INSUFFICIENT_BUFFER;
+        part = separator + 1;
     }
-
-    /* Try preferred form first, then fallback to the alternate if it fails. */
-    HINSTANCE rc = ShellExecuteW(NULL, L"open", L"wt.exe", args, NULL, SW_SHOWNORMAL);
-
-    if (!((INT_PTR)rc > 32)) {
-        rc = ShellExecuteW(NULL, L"open", L"wt.exe", altArgs, NULL, SW_SHOWNORMAL);
-    }
-
-    return ((INT_PTR)rc > 32);
+    return S_OK;
 }
 
-/* Resolve the target before Terminal changes the inherited working directory. */
-static HRESULT ResolveTargetPaths(const wchar_t *input,
-                                   wchar_t *msysPath,
-                                   wchar_t *msysDirectory)
+static HRESULT AppendPlaceholder(wchar_t code, const wchar_t *file, const wchar_t *directory,
+                                 const wchar_t *title, wchar_t *command, size_t commandCount)
 {
-    wchar_t path[PATH_CAPACITY];
-    DWORD length = GetFullPathNameW(input, _countof(path), path, NULL);
-    if (length == 0 || length >= _countof(path)) {
-        return E_FAIL;
-    }
-
-    HRESULT hr = WinPathToMsys2(path, msysPath, PATH_CAPACITY);
-    if (FAILED(hr)) {
-        return hr;
-    }
-
-    DWORD attributes = GetFileAttributesW(path);
-    if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY)) {
-        wchar_t *slash = wcsrchr(path, L'\\');
-        if (slash == NULL) {
-            return E_FAIL;
-        }
-        /* Keep the separator in a drive root, including for a new file. */
-        if (slash == path + 2 && path[1] == L':') {
-            ++slash;
-        }
-        *slash = L'\0';
-    }
-    return WinPathToMsys2(path, msysDirectory, PATH_CAPACITY);
+    if (code == L'%') return StringCchCatW(command, commandCount, L"%");
+    if (code == L'f') return file ? QuoteArgument(command, commandCount, file) : S_OK;
+    if (code == L'd') return QuoteArgument(command, commandCount, directory);
+    if (code == L't') return QuoteArgument(command, commandCount, title);
+    return E_INVALIDARG;
 }
 
-/* Windows subsystem entry point. */
-int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR pCmdLine,
-                    int nShowCmd)
+static HRESULT ExpandCommand(const AppConfig *config, const wchar_t *target,
+                             wchar_t *command, size_t commandCount)
 {
-    (void)hInst;
-    (void)hPrev;
-    (void)pCmdLine;
-    (void)nShowCmd;
+    wchar_t directory[PATH_CAPACITY], file[PATH_CAPACITY], title[PATH_CAPACITY] = L"Neovim";
+    if (target && FAILED(GetTargetDirectory(target, directory, _countof(directory)))) return E_FAIL;
+    if (!target && FAILED(GetDefaultDirectory(directory, _countof(directory)))) return E_FAIL;
+    if (target && FAILED(FormatFilePath(config->fileStyle, target, file, _countof(file)))) return E_FAIL;
+    if (target && FAILED(BuildTitle(file, config->titleStyle, title, _countof(title)))) return E_FAIL;
 
-    AppConfig cfg;
-    LoadAppConfig(&cfg);
+    command[0] = L'\0';
+    for (const wchar_t *p = config->command; *p; ++p) {
+        if (*p == L'%' && wcschr(L"fdt%", p[1])) {
+            HRESULT result = AppendPlaceholder(p[1], target ? file : NULL, directory, title,
+                                               command, commandCount);
+            if (FAILED(result)) return result;
+            ++p;
+        } else if (FAILED(StringCchCatNW(command, commandCount, p, 1))) {
+            return STRSAFE_E_INSUFFICIENT_BUFFER;
+        }
+    }
+    return S_OK;
+}
 
-    const wchar_t *error = NULL;
+static BOOL Launch(const AppConfig *config, const wchar_t *target)
+{
+    wchar_t command[COMMAND_CAPACITY];
+    STARTUPINFOW startup = { .cb = sizeof(startup) };
+    PROCESS_INFORMATION process = {0};
+    if (FAILED(ExpandCommand(config, target, command, _countof(command)))) return FALSE;
+    if (!CreateProcessW(NULL, command, NULL, NULL, FALSE, 0, NULL, NULL, &startup, &process)) return FALSE;
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return TRUE;
+}
+
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR commandLine, int show)
+{
+    (void)instance; (void)previous; (void)commandLine; (void)show;
+    AppConfig config;
+    wchar_t target[PATH_CAPACITY];
     int argc = 0;
     LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    wchar_t msysPath[PATH_CAPACITY];
-    wchar_t msysDirectory[PATH_CAPACITY];
+    const wchar_t *error = NULL;
+    LoadConfig(&config);
 
     if (argv == NULL) {
         error = L"Failed to parse command line.";
-    } else if (argc > 1 && FAILED(ResolveTargetPaths(argv[1], msysPath, msysDirectory))) {
-        error = L"Failed to resolve the selected path or working directory.";
-    } else if (!LaunchWt(&cfg, argc > 1 ? msysPath : NULL,
-                        argc > 1 ? msysDirectory : NULL)) {
-        error = L"Failed to start Windows Terminal (wt.exe).";
     }
-
+    else {
+        const wchar_t *launchTarget = NULL;
+        if (argc > 1) {
+            DWORD length = GetFullPathNameW(argv[1], _countof(target), target, NULL);
+            if (length == 0 || length >= _countof(target)) {
+                error = L"Failed to resolve the selected path.";
+            } else {
+                launchTarget = target;
+            }
+        }
+        if (error == NULL && !Launch(&config, launchTarget))
+            error = L"Failed to start the configured terminal command.";
+    }
     LocalFree(argv);
-    if (error != NULL) {
+    if (error) {
         MessageBoxW(NULL, error, L"Open with Nvim", MB_ICONERROR);
         return 1;
     }

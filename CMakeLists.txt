@@ -1,10 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 project(open_with_nvim VERSION 1.1.0 LANGUAGES C)
 
-if(NOT WIN32)
-    message(FATAL_ERROR "open-with-nvim requires a Windows-targeting compiler (MinGW or MSVC).")
-endif()
-
 enable_language(RC)
 add_executable(nvim WIN32 main.c app.rc)
 set_target_properties(nvim PROPERTIES
