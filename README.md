@@ -23,15 +23,18 @@ agnostic: it starts exactly the command you configure.
 
 ```ini
 [open-with-nvim]
-command=wt nt -d %d -p "Fish Shell" --title %t nvim %f
+command=wt nt -d %d -p "Fish Shell" --title %t --suppressApplicationTitle nvim %f
 file-style=normal
 title-style=filename
 ```
 
-`%f` is replaced by the selected absolute path, `%d` by its containing
-directory (or the selected directory), and `%t` by a safely quoted title. Use
-`%%` for a literal percent sign. Do not add quotes around placeholders; the
-launcher supplies them.
+`%f` is replaced by all selected absolute paths, `%d` by the first path's
+containing directory (or the selected directory), and `%t` by a safely quoted
+title derived from the first path. Use
+`%%` for a literal percent sign. The launcher supplies Windows argument quotes;
+`"%d"` and `"%t"` are also supported when you prefer to quote them in the template.
+When `%f` is inside a quoted shell script such as `fish -c "nvim %f"`, it also
+adds Fish-compatible shell quotes needed for a path containing spaces.
 
 Do not wrap the entire `command` value in quotes: Windows INI parsing stops at
 the first quoted argument (such as `"Fish Shell"`).
@@ -50,11 +53,11 @@ Change `command` to the launch syntax for Windows Terminal, WezTerm,
 Alacritty, Kitty, or another terminal. Include `nvim` and `%f` where that
 terminal expects the program and file path.
 
-For an MSYS Fish profile, keep `%f` outside Fish's quoted `-c` script and pass
-it as Fish's first positional argument:
+For an MSYS Fish profile, `%f` can be used directly in Fish's quoted `-c`
+script:
 
 ```ini
-command=wt -w 0 -d %d -p "Fish Shell" --title %t fish -c "nvim \"$argv[1]\"" %f
+command=wt -w 0 -d %d -p "Fish Shell" --title %t --suppressApplicationTitle fish -c "nvim %f"
 file-style=msys
 ```
 

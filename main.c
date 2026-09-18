@@ -38,7 +38,7 @@ static void CreateDefaultConfig(const wchar_t *path)
         "; open-with-nvim runtime configuration\n"
         "[open-with-nvim]\n"
         "; %f=file, %d=terminal directory, %t=title\n"
-        "command=wt nt -d %d -p \"Fish Shell\" --title %t nvim %f\n"
+        "command=wt nt -d %d -p \"Fish Shell\" --title %t --suppressApplicationTitle nvim %f\n"
         "; normal (C:\\path) or msys (/c/path) for %f and %t\n"
         "file-style=normal\n"
         "; filename, simple, or full\n"
@@ -107,7 +107,7 @@ static void LoadConfig(AppConfig *config)
 {
     wchar_t iniPath[PATH_CAPACITY], titleStyle[16], fileStyle[16];
     StringCchCopyW(config->command, _countof(config->command),
-                   L"wt nt -d %d -p \"Fish Shell\" --title %t nvim %f");
+                   L"wt nt -d %d -p \"Fish Shell\" --title %t --suppressApplicationTitle nvim %f");
     config->titleStyle = TITLE_FILENAME;
     config->fileStyle = FILE_NORMAL;
     if (FAILED(GetSiblingPath(L"open-with-nvim.ini", iniPath, _countof(iniPath)))) return;
@@ -198,45 +198,88 @@ static HRESULT BuildTitle(const wchar_t *path, TitleStyle style, wchar_t *title,
     return S_OK;
 }
 
-static HRESULT AppendPlaceholder(wchar_t code, const wchar_t *file, const wchar_t *directory,
-                                 const wchar_t *title, wchar_t *command, size_t commandCount)
+static HRESULT AppendPlaceholder(wchar_t code, const wchar_t *directory, const wchar_t *title,
+                                 wchar_t *command, size_t commandCount)
 {
     if (code == L'%') return StringCchCatW(command, commandCount, L"%");
-    if (code == L'f') return file ? QuoteArgument(command, commandCount, file) : S_OK;
     if (code == L'd') return QuoteArgument(command, commandCount, directory);
     if (code == L't') return QuoteArgument(command, commandCount, title);
     return E_INVALIDARG;
 }
 
-static HRESULT ExpandCommand(const AppConfig *config, const wchar_t *target,
+/* %f in a quoted shell command uses single quotes, safe through Windows Terminal. */
+static HRESULT AppendShellFile(wchar_t *command, size_t commandCount, const wchar_t *file)
+{
+    if (FAILED(StringCchCatW(command, commandCount, L"'"))) return STRSAFE_E_INSUFFICIENT_BUFFER;
+    for (; *file; ++file) {
+        if (*file == L'\'' && FAILED(StringCchCatW(command, commandCount, L"'\\''")))
+            return STRSAFE_E_INSUFFICIENT_BUFFER;
+        if (*file != L'\'' && FAILED(StringCchCatNW(command, commandCount, file, 1)))
+            return STRSAFE_E_INSUFFICIENT_BUFFER;
+    }
+    return StringCchCatW(command, commandCount, L"'");
+}
+
+static HRESULT AppendFiles(FileStyle style, int count, wchar_t **paths, BOOL shell,
+                           wchar_t *command, size_t commandCount)
+{
+    wchar_t target[PATH_CAPACITY], file[PATH_CAPACITY];
+    for (int i = 0; i < count; ++i) {
+        DWORD length = GetFullPathNameW(paths[i], _countof(target), target, NULL);
+        if (length == 0 || length >= _countof(target) ||
+            FAILED(FormatFilePath(style, target, file, _countof(file)))) return E_FAIL;
+        if (i && FAILED(StringCchCatW(command, commandCount, L" "))) return STRSAFE_E_INSUFFICIENT_BUFFER;
+        HRESULT result = shell ? AppendShellFile(command, commandCount, file)
+                               : QuoteArgument(command, commandCount, file);
+        if (FAILED(result)) return result;
+    }
+    return S_OK;
+}
+
+static HRESULT ExpandCommand(const AppConfig *config, int count, wchar_t **paths,
                              wchar_t *command, size_t commandCount)
 {
-    wchar_t directory[PATH_CAPACITY], file[PATH_CAPACITY], title[PATH_CAPACITY] = L"Neovim";
-    if (target && FAILED(GetTargetDirectory(target, directory, _countof(directory)))) return E_FAIL;
-    if (!target && FAILED(GetDefaultDirectory(directory, _countof(directory)))) return E_FAIL;
-    if (target && FAILED(FormatFilePath(config->fileStyle, target, file, _countof(file)))) return E_FAIL;
-    if (target && FAILED(BuildTitle(file, config->titleStyle, title, _countof(title)))) return E_FAIL;
+    wchar_t target[PATH_CAPACITY], directory[PATH_CAPACITY], file[PATH_CAPACITY];
+    wchar_t title[PATH_CAPACITY] = L"Neovim";
+    if (count) {
+        DWORD length = GetFullPathNameW(paths[0], _countof(target), target, NULL);
+        if (length == 0 || length >= _countof(target) ||
+            FAILED(GetTargetDirectory(target, directory, _countof(directory))) ||
+            FAILED(FormatFilePath(config->fileStyle, target, file, _countof(file))) ||
+            FAILED(BuildTitle(file, config->titleStyle, title, _countof(title)))) return E_FAIL;
+    } else if (FAILED(GetDefaultDirectory(directory, _countof(directory)))) return E_FAIL;
 
     command[0] = L'\0';
+    BOOL quoted = FALSE;
+    size_t slashes = 0;
     for (const wchar_t *p = config->command; *p; ++p) {
         if (*p == L'%' && wcschr(L"fdt%", p[1])) {
-            HRESULT result = AppendPlaceholder(p[1], target ? file : NULL, directory, title,
-                                               command, commandCount);
+            const wchar_t *value = p[1] == L'd' ? directory : title;
+            HRESULT result = p[1] == L'f'
+                ? AppendFiles(config->fileStyle, count, paths, quoted, command, commandCount)
+                : quoted && p[1] != L'%' ? StringCchCatW(command, commandCount, value)
+                : AppendPlaceholder(p[1], directory, title, command, commandCount);
             if (FAILED(result)) return result;
             ++p;
+            slashes = 0;
         } else if (FAILED(StringCchCatNW(command, commandCount, p, 1))) {
             return STRSAFE_E_INSUFFICIENT_BUFFER;
+        } else if (*p == L'\\') {
+            ++slashes;
+        } else {
+            if (*p == L'"' && !(slashes & 1)) quoted = !quoted;
+            slashes = 0;
         }
     }
     return S_OK;
 }
 
-static BOOL Launch(const AppConfig *config, const wchar_t *target)
+static BOOL Launch(const AppConfig *config, int count, wchar_t **paths)
 {
     wchar_t command[COMMAND_CAPACITY];
     STARTUPINFOW startup = { .cb = sizeof(startup) };
     PROCESS_INFORMATION process = {0};
-    if (FAILED(ExpandCommand(config, target, command, _countof(command)))) return FALSE;
+    if (FAILED(ExpandCommand(config, count, paths, command, _countof(command)))) return FALSE;
     if (!CreateProcessW(NULL, command, NULL, NULL, FALSE, 0, NULL, NULL, &startup, &process)) return FALSE;
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
@@ -247,7 +290,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR commandLine, i
 {
     (void)instance; (void)previous; (void)commandLine; (void)show;
     AppConfig config;
-    wchar_t target[PATH_CAPACITY];
     int argc = 0;
     LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     const wchar_t *error = NULL;
@@ -257,16 +299,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR commandLine, i
         error = L"Failed to parse command line.";
     }
     else {
-        const wchar_t *launchTarget = NULL;
-        if (argc > 1) {
-            DWORD length = GetFullPathNameW(argv[1], _countof(target), target, NULL);
-            if (length == 0 || length >= _countof(target)) {
-                error = L"Failed to resolve the selected path.";
-            } else {
-                launchTarget = target;
-            }
-        }
-        if (error == NULL && !Launch(&config, launchTarget))
+        if (!Launch(&config, argc - 1, argv + 1))
             error = L"Failed to start the configured terminal command.";
     }
     LocalFree(argv);
